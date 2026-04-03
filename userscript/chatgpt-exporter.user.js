@@ -1,10 +1,12 @@
 // ==UserScript==
-// @name         ChatGPT Conversation Exporter (Manual + Floating UI)
+// @name         ChatGPT Conversation Exporter
 // @namespace    https://chatgpt.com/
-// @version      0.3.0
+// @version      0.4.0
 // @description  Export current ChatGPT conversation to MD/JSON/TXT/PDF.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
+// @updateURL    https://raw.githubusercontent.com/fallingduck/chatGPT-exporter/main/userscript/chatgpt-exporter.user.js
+// @downloadURL  https://raw.githubusercontent.com/fallingduck/chatGPT-exporter/main/userscript/chatgpt-exporter.user.js
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
@@ -15,7 +17,13 @@
   var TOOLBAR_ID = "cgpt-export-toolbar";
   var STYLE_ID = "cgpt-export-style";
   var UI_STORAGE_KEY = "cgpt_export_ui_v1";
+  var SCRIPT_VERSION = "0.4.0";
   var TZ = "Asia/Shanghai";
+  var DEFAULT_UI_STATE = {
+    collapsed: false,
+    includeMetadata: true,
+    expandCitations: true
+  };
 
   var uiState = loadUiState();
 
@@ -23,14 +31,16 @@
     try {
       var raw = localStorage.getItem(UI_STORAGE_KEY);
       if (!raw) {
-        return { collapsed: false };
+        return Object.assign({}, DEFAULT_UI_STATE);
       }
       var parsed = JSON.parse(raw);
       return {
-        collapsed: parsed && parsed.collapsed === true
+        collapsed: parsed && parsed.collapsed === true,
+        includeMetadata: !parsed || parsed.includeMetadata !== false,
+        expandCitations: !parsed || parsed.expandCitations !== false
       };
     } catch (_err) {
-      return { collapsed: false };
+      return Object.assign({}, DEFAULT_UI_STATE);
     }
   }
 
@@ -253,6 +263,53 @@
       .trim();
   }
 
+  function extractCitations(msgNode) {
+    var anchors = Array.from(msgNode.querySelectorAll("a[href]"));
+    var citations = [];
+    var seen = {};
+    anchors.forEach(function (a) {
+      var href = (a.getAttribute("href") || "").trim();
+      if (!href) return;
+      if (/^(javascript|data):/i.test(href)) return;
+      var label = (a.textContent || "").trim();
+      var key = href + "\n" + label;
+      if (seen[key]) return;
+      seen[key] = true;
+      citations.push({
+        label: label || href,
+        url: href
+      });
+    });
+    return citations;
+  }
+
+  function extractAttachments(msgNode) {
+    var links = Array.from(msgNode.querySelectorAll("a[download],a[href*='/files/'],a[href*='sandbox:']"));
+    var attachments = [];
+    var seen = {};
+    links.forEach(function (a) {
+      var href = (a.getAttribute("href") || "").trim();
+      if (!href) return;
+      if (seen[href]) return;
+      seen[href] = true;
+      var name = (a.getAttribute("download") || a.textContent || "").trim();
+      attachments.push({
+        name: name || href.split("/").pop() || "attachment",
+        url: href
+      });
+    });
+    return attachments;
+  }
+
+  function getActiveTimezone() {
+    try {
+      var guessed = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      return guessed || TZ;
+    } catch (_err) {
+      return TZ;
+    }
+  }
+
   function makeMessageRecord(msgNode, role, index) {
     var messageId = msgNode.getAttribute("data-message-id") || msgNode.id || "message_" + String(index + 1);
     var timeEl = msgNode.querySelector("time");
@@ -263,18 +320,20 @@
       role: role || "unknown",
       created_at: createdAt,
       content_parts: [{ type: "markdown", text: htmlToMarkdown(msgNode) }],
-      citations: [],
-      attachments: []
+      citations: extractCitations(msgNode),
+      attachments: extractAttachments(msgNode)
     };
   }
 
-  function buildConversationRecord() {
+  function buildConversationRecord(options) {
+    options = options || {};
     var items = collectMessageNodes();
     if (!items || items.length === 0) {
       throw new Error("No parseable chat messages found. ChatGPT DOM may have changed.");
     }
     var now = new Date();
     var title = getConversationTitle();
+    var timeZone = getActiveTimezone();
     var messages = items.map(function (x, idx) { return makeMessageRecord(x.node, x.role, idx); }).filter(function (m) {
       var t = m.content_parts[0] && m.content_parts[0].text;
       return t && t.trim();
@@ -282,13 +341,22 @@
     if (messages.length === 0) {
       throw new Error("Messages were detected but content extraction failed.");
     }
-    return {
+    var record = {
       source: "chatgpt_web_dom",
       thread_url: window.location.href,
       title: title,
-      exported_at: formatIsoInTimezone(now, TZ),
+      exported_at: formatIsoInTimezone(now, timeZone),
       messages: messages
     };
+    if (options.includeMetadata !== false) {
+      record.schema_version = "1.1";
+      record.meta = {
+        script_version: SCRIPT_VERSION,
+        host: window.location.hostname || "unknown",
+        time_zone: timeZone
+      };
+    }
+    return record;
   }
 
   function safeYamlValue(value) {
@@ -296,16 +364,22 @@
     return '"' + v.replace(/\\/g, "\\\\").replace(/"/g, '\\"') + '"';
   }
 
-  function recordToMarkdown(record) {
+  function recordToMarkdown(record, options) {
+    options = options || {};
     var lines = [];
-    lines.push("---");
-    lines.push("title: " + safeYamlValue(record.title));
-    lines.push("source: " + safeYamlValue(record.source));
-    lines.push("thread_url: " + safeYamlValue(record.thread_url));
-    lines.push("exported_at: " + safeYamlValue(record.exported_at));
-    lines.push("message_count: " + record.messages.length);
-    lines.push("---");
-    lines.push("");
+    if (options.includeMetadata !== false) {
+      lines.push("---");
+      lines.push("title: " + safeYamlValue(record.title));
+      lines.push("source: " + safeYamlValue(record.source));
+      lines.push("thread_url: " + safeYamlValue(record.thread_url));
+      lines.push("exported_at: " + safeYamlValue(record.exported_at));
+      lines.push("message_count: " + record.messages.length);
+      if (record.schema_version) {
+        lines.push("schema_version: " + safeYamlValue(record.schema_version));
+      }
+      lines.push("---");
+      lines.push("");
+    }
     lines.push("# " + record.title);
     lines.push("");
     lines.push("## Table of Contents");
@@ -326,18 +400,36 @@
       for (var k = 0; k < msg.content_parts.length; k += 1) {
         lines.push(msg.content_parts[k].text || "");
       }
+      if (options.expandCitations !== false && msg.citations && msg.citations.length > 0) {
+        lines.push("");
+        lines.push("### Citations");
+        lines.push("");
+        for (var c = 0; c < msg.citations.length; c += 1) {
+          var citation = msg.citations[c];
+          lines.push("- [" + (citation.label || citation.url || "link") + "](" + (citation.url || "#") + ")");
+        }
+      }
       lines.push("");
     }
     return lines.join("\n").replace(/\n{3,}/g, "\n\n");
   }
 
-  function recordToPlainText(record) {
+  function recordToPlainText(record, options) {
+    options = options || {};
     var lines = [];
     lines.push("Title: " + record.title);
-    lines.push("Source: " + record.source);
-    lines.push("Thread URL: " + record.thread_url);
-    lines.push("Exported At: " + record.exported_at);
-    lines.push("Message Count: " + record.messages.length);
+    if (options.includeMetadata !== false) {
+      lines.push("Source: " + record.source);
+      lines.push("Thread URL: " + record.thread_url);
+      lines.push("Exported At: " + record.exported_at);
+      lines.push("Message Count: " + record.messages.length);
+      if (record.schema_version) {
+        lines.push("Schema Version: " + record.schema_version);
+      }
+      if (record.meta && record.meta.time_zone) {
+        lines.push("Time Zone: " + record.meta.time_zone);
+      }
+    }
     lines.push("");
     for (var i = 0; i < record.messages.length; i += 1) {
       var msg = record.messages[i];
@@ -348,6 +440,14 @@
       lines.push("");
       for (var j = 0; j < msg.content_parts.length; j += 1) {
         lines.push(msg.content_parts[j].text || "");
+      }
+      if (options.expandCitations !== false && msg.citations && msg.citations.length > 0) {
+        lines.push("");
+        lines.push("Citations:");
+        for (var c = 0; c < msg.citations.length; c += 1) {
+          var citation = msg.citations[c];
+          lines.push("- " + (citation.label || citation.url || "link") + ": " + (citation.url || ""));
+        }
       }
       lines.push("");
     }
@@ -575,10 +675,13 @@
     return sanitizeRenderedHtml(renderMarkdownBlocks(markdown));
   }
 
-  function recordToPrintableHtml(record) {
+  function recordToPrintableHtml(record, options) {
+    options = options || {};
     var sections = [];
     sections.push("<h1>" + escapeHtml(record.title) + "</h1>");
-    sections.push("<p class='meta'><strong>Source:</strong> " + escapeHtml(record.source) + "<br><strong>Thread URL:</strong> " + escapeHtml(record.thread_url) + "<br><strong>Exported At:</strong> " + escapeHtml(record.exported_at) + "</p>");
+    if (options.includeMetadata !== false) {
+      sections.push("<p class='meta'><strong>Source:</strong> " + escapeHtml(record.source) + "<br><strong>Thread URL:</strong> " + escapeHtml(record.thread_url) + "<br><strong>Exported At:</strong> " + escapeHtml(record.exported_at) + "</p>");
+    }
     for (var i = 0; i < record.messages.length; i += 1) {
       var msg = record.messages[i];
       var content = "";
@@ -589,7 +692,16 @@
         }
       }
       var bodyHtml = renderMarkdownToSafeHtml(content);
-      sections.push("<section class='msg-block'><h2>" + String(i + 1) + ". " + escapeHtml(msg.role.toUpperCase()) + "</h2>" + (msg.created_at ? "<p class='meta'><em>Created at: " + escapeHtml(msg.created_at) + "</em></p>" : "") + "<div class='md-content'>" + bodyHtml + "</div></section>");
+      var citationHtml = "";
+      if (options.expandCitations !== false && msg.citations && msg.citations.length > 0) {
+        var items = msg.citations.map(function (citation) {
+          var label = escapeHtml(citation.label || citation.url || "link");
+          var url = escapeHtml(citation.url || "#");
+          return "<li><a href='" + url + "'>" + label + "</a></li>";
+        }).join("");
+        citationHtml = "<details class='citations'><summary>Citations (" + msg.citations.length + ")</summary><ul>" + items + "</ul></details>";
+      }
+      sections.push("<section class='msg-block'><h2>" + String(i + 1) + ". " + escapeHtml(msg.role.toUpperCase()) + "</h2>" + (msg.created_at ? "<p class='meta'><em>Created at: " + escapeHtml(msg.created_at) + "</em></p>" : "") + "<div class='md-content'>" + bodyHtml + "</div>" + citationHtml + "</section>");
     }
     return "<!doctype html><html><head><meta charset='utf-8'><title>" + escapeHtml(record.title) + "</title><style>" +
       "body{font-family:'Segoe UI',Arial,sans-serif;color:#111;padding:24px;max-width:980px;margin:0 auto;line-height:1.55;}" +
@@ -608,6 +720,10 @@
       ".md-content th{background:#f8fafc;font-weight:600;}" +
       ".md-content a{color:#2563eb;text-decoration:underline;word-break:break-all;}" +
       ".md-content hr{border:none;border-top:1px solid #e2e8f0;margin:14px 0;}" +
+      ".citations{margin:10px 0 12px;font-size:12px;color:#334155;}" +
+      ".citations summary{cursor:pointer;font-weight:600;}" +
+      ".citations ul{margin:8px 0 0 18px;padding:0;}" +
+      ".citations li{margin:4px 0;}" +
       "</style></head><body>" + sections.join("\n") + "</body></html>";
   }
 
@@ -626,7 +742,7 @@
   }
 
   function buildFilenameBase(record) {
-    return formatTimestampForFilename(new Date(), TZ) + "__" + slugify(record.title);
+    return formatTimestampForFilename(new Date(), getActiveTimezone()) + "__" + slugify(record.title);
   }
 
   function setStatus(text, isError) {
@@ -689,7 +805,7 @@
 
   function exportJson() {
     try {
-      var record = buildConversationRecord();
+      var record = buildConversationRecord({ includeMetadata: uiState.includeMetadata });
       var file = buildFilenameBase(record) + ".json";
       downloadText(JSON.stringify(record, null, 2), file, "application/json;charset=utf-8");
       setStatus("JSON exported: " + file, false);
@@ -701,8 +817,11 @@
 
   function exportMarkdown() {
     try {
-      var record = buildConversationRecord();
-      var md = recordToMarkdown(record);
+      var record = buildConversationRecord({ includeMetadata: uiState.includeMetadata });
+      var md = recordToMarkdown(record, {
+        includeMetadata: uiState.includeMetadata,
+        expandCitations: uiState.expandCitations
+      });
       var file = buildFilenameBase(record) + ".md";
       downloadText(md, file, "text/markdown;charset=utf-8");
       setStatus("Markdown exported: " + file, false);
@@ -714,8 +833,11 @@
 
   function exportTxt() {
     try {
-      var record = buildConversationRecord();
-      var txt = recordToPlainText(record);
+      var record = buildConversationRecord({ includeMetadata: uiState.includeMetadata });
+      var txt = recordToPlainText(record, {
+        includeMetadata: uiState.includeMetadata,
+        expandCitations: uiState.expandCitations
+      });
       var file = buildFilenameBase(record) + ".txt";
       downloadText(txt, file, "text/plain;charset=utf-8");
       setStatus("TXT exported: " + file, false);
@@ -727,16 +849,17 @@
 
   function exportPdf() {
     try {
-      var record = buildConversationRecord();
-      var html = recordToPrintableHtml(record);
+      var record = buildConversationRecord({ includeMetadata: uiState.includeMetadata });
+      var html = recordToPrintableHtml(record, {
+        includeMetadata: uiState.includeMetadata,
+        expandCitations: uiState.expandCitations
+      });
       printHtmlWithHiddenFrame(html)
         .then(function () {
           setStatus("PDF print dialog opened (Save as PDF).", false);
         })
         .catch(function () {
-          var fallbackFile = buildFilenameBase(record) + ".pdf-print.html";
-          downloadText(html, fallbackFile, "text/html;charset=utf-8");
-          setStatus("Print blocked. Downloaded HTML fallback: " + fallbackFile + " (open it and Ctrl+P).", true);
+          setStatus("Print blocked. Re-run Export PDF to try again.", true);
         });
     } catch (err) {
       alert("[Chat Exporter] " + err.message);
@@ -837,6 +960,25 @@
       "  flex-direction: column;",
       "  gap: 7px;",
       "}",
+      "#" + TOOLBAR_ID + " .cgpt-export-settings {",
+      "  display: grid;",
+      "  gap: 6px;",
+      "  margin-top: 2px;",
+      "  padding-top: 8px;",
+      "  border-top: 1px solid rgba(15, 23, 42, 0.08);",
+      "}",
+      "#" + TOOLBAR_ID + " .cgpt-export-settings label {",
+      "  display: flex;",
+      "  align-items: flex-start;",
+      "  gap: 6px;",
+      "  font-size: 11px;",
+      "  line-height: 1.35;",
+      "  color: var(--cgpt-text-muted);",
+      "  cursor: pointer;",
+      "}",
+      "#" + TOOLBAR_ID + " .cgpt-export-settings input[type='checkbox'] {",
+      "  margin-top: 1px;",
+      "}",
       "#" + TOOLBAR_ID + " button.cgpt-btn {",
       "  width: 100%;",
       "  border: 1px solid var(--cgpt-btn-border);",
@@ -899,6 +1041,10 @@
       "<button class='cgpt-btn' id='cgpt-export-txt' type='button'>Export TXT</button>" +
       "<button class='cgpt-btn' id='cgpt-export-pdf' type='button'>Export PDF</button>" +
       "</div>" +
+      "<div class='cgpt-export-settings'>" +
+      "<label><input id='cgpt-setting-metadata' type='checkbox' />Include metadata</label>" +
+      "<label><input id='cgpt-setting-citations' type='checkbox' />Expand citations</label>" +
+      "</div>" +
       "<div id='cgpt-export-status'>Ready</div>" +
       "</div>";
     document.body.appendChild(root);
@@ -908,6 +1054,20 @@
     root.querySelector("#cgpt-export-txt").addEventListener("click", exportTxt);
     root.querySelector("#cgpt-export-pdf").addEventListener("click", exportPdf);
     root.querySelector("#cgpt-export-collapse").addEventListener("click", toggleCollapse);
+
+    var metadataInput = root.querySelector("#cgpt-setting-metadata");
+    var citationsInput = root.querySelector("#cgpt-setting-citations");
+    metadataInput.checked = uiState.includeMetadata;
+    citationsInput.checked = uiState.expandCitations;
+    metadataInput.addEventListener("change", function () {
+      uiState.includeMetadata = !!metadataInput.checked;
+      saveUiState();
+    });
+    citationsInput.addEventListener("change", function () {
+      uiState.expandCitations = !!citationsInput.checked;
+      saveUiState();
+    });
+
     updateToolbarVisualState();
   }
 

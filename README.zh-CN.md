@@ -12,7 +12,10 @@
   - `Export JSON`
   - `Export TXT`
   - `Export PDF`
-- PDF 导出使用隐藏打印框架；如果浏览器阻止打印，会下载 HTML 兜底文件（`.pdf-print.html`），可手动 `Ctrl+P`。
+- 内置导出设置（保存到 `localStorage`）：
+  - `Include metadata`（默认开启）
+  - `Expand citations`（默认开启）
+- PDF 导出使用隐藏打印框架；如果浏览器阻止打印，直接重试导出即可。
 - 全程本地处理，不会上传到任何服务器。
 
 ## 安装
@@ -29,7 +32,7 @@
 3. 脚本会在浏览器中直接下载文件。
 4. PDF 导出说明：
    - 如果正常弹出打印，选择“保存为 PDF”。
-   - 如果打印被拦截，打开下载的 `.pdf-print.html` 后按 `Ctrl+P`。
+   - 如果打印被拦截，重新点击 `Export PDF` 再试一次。
 
 ## 导出数据模型
 

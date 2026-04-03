@@ -12,7 +12,10 @@ Export the **currently opened ChatGPT conversation** from the web UI to Markdown
   - `Export JSON`
   - `Export TXT`
   - `Export PDF`
-- PDF export uses a hidden print frame. If printing is blocked, it downloads an HTML fallback (`.pdf-print.html`) for manual `Ctrl+P`.
+- Built-in export settings (persisted in `localStorage`):
+  - `Include metadata` (default: on)
+  - `Expand citations` (default: on)
+- PDF export uses a hidden print frame. If printing is blocked, retry export.
 - Local-only workflow: no upload to any server.
 
 ## Install
@@ -29,7 +32,7 @@ Export the **currently opened ChatGPT conversation** from the web UI to Markdown
 3. The script downloads the file directly in your browser.
 4. For PDF:
    - If print opens normally, choose "Save as PDF".
-   - If print is blocked, open the downloaded `.pdf-print.html` and press `Ctrl+P`.
+   - If print is blocked, run `Export PDF` again.
 
 ## Export Data Model
 
